@@ -8,13 +8,72 @@ import (
 	"time"
 )
 
-// dialWithTFO 是一个支持 TCP Fast Open 的拨号器
-func dialWithTFO(ctx context.Context, addr string) (net.Conn, error) {
+// dialHappyEyeballs 实现 Happy Eyeballs v2 (RFC 8305) 赛马竞争算法
+func (p *BackendPool) dialHappyEyeballs(ctx context.Context, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return p.dialSingle(ctx, addr)
+	}
+
+	// 并发解析 IPv4 和 IPv6
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return p.dialSingle(ctx, addr)
+	}
+
+	// 准备赛马任务
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	resCh := make(chan result, len(ips))
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 赛马控制器
+	for i, ip := range ips {
+		go func(targetIP net.IP) {
+			targetAddr := net.JoinHostPort(targetIP.String(), port)
+			conn, err := p.dialSingle(raceCtx, targetAddr)
+			select {
+			case resCh <- result{conn: conn, err: err}:
+			case <-raceCtx.Done():
+				if conn != nil {
+					conn.Close()
+				}
+			}
+		}(ip)
+
+		// 250ms 的 Stagger 延迟启动，避免 SYN Flood
+		if i < len(ips)-1 {
+			select {
+			case <-time.After(250 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+
+	// 等待赢家产生
+	var lastErr error
+	for range ips {
+		res := <-resCh
+		if res.err == nil {
+			cancel() // 赢家已定，通知其他选手退赛
+			return res.conn, nil
+		}
+		lastErr = res.err
+	}
+
+	return nil, lastErr
+}
+
+// dialSingle 是带 TFO 的单路拨号器，作为赛马的基础单元
+func (p *BackendPool) dialSingle(ctx context.Context, addr string) (net.Conn, error) {
 	d := net.Dialer{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
-				// 30 是 Linux 上的 TCP_FASTOPEN_CONNECT 选项
-				// 设置为 1 开启客户端端的 TFO
+				// TCP_FASTOPEN_CONNECT
 				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 30, 1)
 			})
 		},
@@ -58,7 +117,7 @@ func (p *BackendPool) PreHeat(addr string, count int) {
 	go func() {
 		for i := 0; i < count; i++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			conn, err := dialWithTFO(ctx, addr)
+			conn, err := p.dialHappyEyeballs(ctx, addr)
 			cancel()
 			if err != nil {
 				continue
@@ -108,7 +167,7 @@ func (p *BackendPool) Get(addr string) (net.Conn, error) {
 			
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			return dialWithTFO(ctx, addr)
+			return p.dialHappyEyeballs(ctx, addr)
 		}
 	}
 }
@@ -132,7 +191,7 @@ func (p *BackendPool) triggerRefill(addr string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	
-	conn, err := dialWithTFO(ctx, addr)
+	conn, err := p.dialHappyEyeballs(ctx, addr)
 	if err != nil {
 		return
 	}
