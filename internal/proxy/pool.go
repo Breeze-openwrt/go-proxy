@@ -98,13 +98,55 @@ func (p *BackendPool) Get(addr string) (net.Conn, error) {
 				continue
 			}
 
+			// 3. 成功拿到连接，触发异步回填补充水位
+			go p.triggerRefill(addr)
 			return item.conn, nil
 		default:
-			// 池子空了，发起新的握手 (带 TFO)
+			// 池子空了，发起同步拨号 (带 TFO)
+			// 同时触发异步回填，防止下一次请求继续落入同步拨号
+			go p.triggerRefill(addr)
+			
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			return dialWithTFO(ctx, addr)
 		}
+	}
+}
+
+// triggerRefill 尝试为指定地址补充一个空闲连接
+func (p *BackendPool) triggerRefill(addr string) {
+	p.mu.Lock()
+	ch, ok := p.pools[addr]
+	p.mu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	// 提前嗅探：如果通道正忙或已满，直接退出
+	if len(ch) >= cap(ch) {
+		return
+	}
+
+	// 开始异步拨号
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	
+	conn, err := dialWithTFO(ctx, addr)
+	if err != nil {
+		return
+	}
+
+	// 尝试存入
+	select {
+	case ch <- &idleConn{
+		conn:   conn,
+		idleAt: time.Now(),
+	}:
+		// 成功存入，它将在池中等待下一个 Get
+	default:
+		// 存入失败（池子刚被填满），关闭该多余连接
+		conn.Close()
 	}
 }
 
