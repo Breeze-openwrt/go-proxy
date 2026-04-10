@@ -31,7 +31,7 @@ jobs:
           go build -ldflags="-s -w" -o sni-proxy main.go
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/') # 仅在推送 tag 时执行
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
@@ -43,7 +43,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup Old Releases and Tags
-        if: startsWith(github.ref, 'refs/tags/') # 仅在推送 tag 时执行
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_TAG: ${{ github.ref_name }}
