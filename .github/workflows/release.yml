@@ -52,9 +52,15 @@ jobs:
           CURRENT_TAG: ${{ github.ref_name }}
         run: |
           echo "Scanning for old releases to delete (excluding $CURRENT_TAG)..."
-          OLD_TAGS=$(gh release list --limit 100 | awk -v cur="$CURRENT_TAG" '$3 != cur && $3 != "" {print $3}')
-          for tag in $OLD_TAGS; do
-            echo "Deleting old release and tag: $tag"
-            gh release delete "$tag" -y --cleanup-tag
-          done
+          # 使用 JSON 格式安全提取所有 Tag 名，并排除当前正在发布的 Tag
+          OLD_TAGS=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -v "^$CURRENT_TAG$" || true)
+          
+          if [ -n "$OLD_TAGS" ]; then
+            for tag in $OLD_TAGS; do
+              echo "Deleting old release and tag: $tag"
+              gh release delete "$tag" -y --cleanup-tag || true
+            done
+          else
+            echo "No old releases found to clean up."
+          fi
           echo "Cleanup complete."
