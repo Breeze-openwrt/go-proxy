@@ -8,7 +8,6 @@ on:
       - 'v*'
   workflow_dispatch:
 
-# 核心加固：防止多版本同时发布导致的逻辑冲突
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: true
@@ -32,15 +31,12 @@ jobs:
 
       - name: Build Fully Static Binary
         run: |
-          # 核心修复：-extldflags "-static" 确保生成的二进制文件不依赖 GLIBC，在任何 Linux 上都能直接运行
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o sni-proxy main.go
-          
-          # 检查文件是否存在
           ls -lh sni-proxy
 
       - name: Create or Update Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
@@ -54,17 +50,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enforcement: Keep Only One Release
-        if: always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+      - name: Enforcement - Keep Only One Release
+        if: ${{ always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_TAG: ${{ github.ref_name }}
         run: |
           echo "Enforcing single release policy (Current: $CURRENT_TAG)..."
-          
-          # 获取所有 Release 列表
           RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
-          
           for tag in $RELEASES; do
             if [ "$tag" != "$CURRENT_TAG" ] && [ "$tag" != "latest" ]; then
               echo "Cleaning up redundant release and tag: $tag"
