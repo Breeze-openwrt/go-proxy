@@ -6,7 +6,12 @@ on:
       - main
     tags:
       - 'v*'
-  workflow_dispatch: # 启用手动触发按钮
+  workflow_dispatch:
+
+# 核心加固：防止多版本同时发布导致的逻辑冲突
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -25,12 +30,16 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Build Static Binary
+      - name: Build Fully Static Binary
         run: |
+          # 核心修复：-extldflags "-static" 确保生成的二进制文件不依赖 GLIBC，在任何 Linux 上都能直接运行
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-          go build -ldflags="-s -w" -o sni-proxy main.go
+          go build -trimpath -ldflags="-s -w -extldflags '-static'" -o sni-proxy main.go
+          
+          # 检查文件是否存在
+          ls -lh sni-proxy
 
-      - name: Create Release
+      - name: Create or Update Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         id: create_release
         uses: softprops/action-gh-release@v2
@@ -45,22 +54,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cleanup Old Releases and Tags
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+      - name: Enforcement: Keep Only One Release
+        if: always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_TAG: ${{ github.ref_name }}
         run: |
-          echo "Scanning for old releases to delete (excluding $CURRENT_TAG)..."
-          # 使用 JSON 格式安全提取所有 Tag 名，并排除当前正在发布的 Tag
-          OLD_TAGS=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -v "^$CURRENT_TAG$" || true)
+          echo "Enforcing single release policy (Current: $CURRENT_TAG)..."
           
-          if [ -n "$OLD_TAGS" ]; then
-            for tag in $OLD_TAGS; do
-              echo "Deleting old release and tag: $tag"
+          # 获取所有 Release 列表
+          RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          
+          for tag in $RELEASES; do
+            if [ "$tag" != "$CURRENT_TAG" ] && [ "$tag" != "latest" ]; then
+              echo "Cleaning up redundant release and tag: $tag"
               gh release delete "$tag" -y --cleanup-tag || true
-            done
-          else
-            echo "No old releases found to clean up."
-          fi
-          echo "Cleanup complete."
+            fi
+          done
+          echo "Repository is now clean."
