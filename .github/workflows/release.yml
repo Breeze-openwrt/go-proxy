@@ -36,7 +36,7 @@ jobs:
           ls -lh sni-proxy
 
       - name: Create or Update Release
-        if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+        # 移除了 if 限制，确保每次运行都会创建/更新 Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
@@ -51,17 +51,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enforcement - Keep Only One Release
-        if: ${{ always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+        # 确保清理始终执行
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_TAG: ${{ github.ref_name }}
         run: |
           echo "Enforcing single release policy (Current: $CURRENT_TAG)..."
+          
+          # 针对 main 分支推送，当前有效 Tag 视为 'latest'
+          [ "$CURRENT_TAG" = "main" ] && CURRENT_TAG="latest"
+          
           RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
           for tag in $RELEASES; do
-            if [ "$tag" != "$CURRENT_TAG" ] && [ "$tag" != "latest" ]; then
+            if [ "$tag" != "$CURRENT_TAG" ]; then
               echo "Cleaning up redundant release and tag: $tag"
               gh release delete "$tag" -y --cleanup-tag || true
             fi
           done
-          echo "Repository is now clean."
+          echo "Repository cleanup complete."
