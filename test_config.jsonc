@@ -1,0 +1,10 @@
+{
+  "listen_addr": "0.0.0.0:8888",
+  "log": {
+    "level": "info",
+    "output": "test_proxy.log"
+  },
+  "routes": {
+    "google.com": { "addr": "1.1.1.1:443", "jump_start": 2 }
+  }
+}

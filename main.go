@@ -11,14 +11,28 @@ import (
 	"github.com/dan/go-sni-proxy/internal/config"
 	"github.com/dan/go-sni-proxy/internal/daemon"
 	"github.com/dan/go-sni-proxy/internal/listener"
+	"github.com/dan/go-sni-proxy/internal/logger"
 	"github.com/dan/go-sni-proxy/internal/proxy"
 	"github.com/dan/go-sni-proxy/internal/router"
 )
+
+// 定义自定义类型用于统计 -v 的次数
+type vFlag int
+
+func (v *vFlag) String() string   { return fmt.Sprint(int(*v)) }
+func (v *vFlag) Set(s string) error {
+	*v++
+	return nil
+}
+func (v *vFlag) IsBoolFlag() bool { return true }
 
 func main() {
 	// 定义命令行参数
 	configPath := flag.String("c", "config.jsonc", "Path to config file")
 	daemonMode := flag.Bool("d", false, "Run in background (daemon mode)")
+	
+	var vCount vFlag
+	flag.Var(&vCount, "v", "Verbosity level (use -v for debug, -vv for trace)")
 	flag.Parse()
 
 	// 1. 处理后台化
@@ -52,7 +66,13 @@ func main() {
 	// 4. 加载配置
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		logger.Fatal("Failed to load config: %v", err)
+	}
+
+	// 5. 初始化日志系统 (必须在配置加载后，因为需要 log.output)
+	if err := logger.Init(int(vCount), cfg.Log.Output, cfg.Log.Level); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
 	}
 
 	// 2. 初始化路由
@@ -62,7 +82,7 @@ func main() {
 	p := proxy.NewBackendPool()
 	for _, routeCfg := range cfg.Routes {
 		if routeCfg.JumpStart > 0 {
-			log.Printf("Pre-heating pool for %s (count: %d)", routeCfg.Addr, routeCfg.JumpStart)
+			logger.Debug("Pre-heating pool for %s (count: %d)", routeCfg.Addr, routeCfg.JumpStart)
 			p.PreHeat(routeCfg.Addr, routeCfg.JumpStart)
 		}
 	}
@@ -75,8 +95,8 @@ func main() {
 		Pool:             p,
 	}
 
-	log.Printf("Starting SNI Proxy on %s (Interface: %s)...", cfg.ListenAddr, cfg.NetworkInterface)
+	logger.Info("Starting SNI Proxy on %s (Interface: %s)...", cfg.ListenAddr, cfg.NetworkInterface)
 	if err := srv.Start(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		logger.Fatal("Server failed: %v", err)
 	}
 }

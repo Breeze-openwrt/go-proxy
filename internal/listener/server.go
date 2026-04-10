@@ -2,12 +2,11 @@ package listener
 
 import (
 	"context"
-	"log/slog"
 	"net"
-	"os"
 	"syscall"
 	"time"
 
+	"github.com/dan/go-sni-proxy/internal/logger"
 	"github.com/dan/go-sni-proxy/internal/proxy"
 	"github.com/dan/go-sni-proxy/internal/router"
 	"github.com/dan/go-sni-proxy/internal/sniffer"
@@ -19,7 +18,6 @@ type Server struct {
 	NetworkInterface string
 	Router           *router.Router
 	Pool             *proxy.BackendPool // 新增：连接池
-	log              *slog.Logger
 }
 
 // Start 启动监听服务
@@ -49,15 +47,14 @@ func (s *Server) Start() error {
 
 // Serve 在指定的 Listener 上启动服务
 func (s *Server) Serve(l net.Listener) error {
-	s.log = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	defer l.Close()
 
-	s.log.Info("Proxy server started", "addr", l.Addr().String())
+	logger.Info("Proxy server started on %s", l.Addr().String())
 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			s.log.Error("Accept error", "err", err)
+			logger.Error("Accept error: %v", err)
 			continue
 		}
 
@@ -74,7 +71,7 @@ func (s *Server) HandleConn(conn net.Conn) {
 	result, err := sniffer.Sniff(conn)
 	sniffDuration := time.Since(sniffStart)
 	if err != nil {
-		s.log.Debug("Sniff failed (maybe not TLS)", "remote", conn.RemoteAddr(), "err", err)
+		logger.Debug("Sniff failed (maybe not TLS) from %v: %v", conn.RemoteAddr(), err)
 		return
 	}
 
@@ -83,7 +80,7 @@ func (s *Server) HandleConn(conn net.Conn) {
 	route, ok := s.Router.Lookup(result.Domain)
 	matchDuration := time.Since(matchStart)
 	if !ok {
-		s.log.Warn("No route found for domain", "domain", result.Domain)
+		logger.Warn("No route found for domain: %s (from %v)", result.Domain, conn.RemoteAddr())
 		return
 	}
 
@@ -92,20 +89,20 @@ func (s *Server) HandleConn(conn net.Conn) {
 	backendConn, err := s.Pool.Get(route.Addr)
 	dialDuration := time.Since(dialStart)
 	if err != nil {
-		s.log.Error("Failed to connect to backend", "addr", route.Addr, "err", err)
+		logger.Error("Failed to connect to backend %s: %v", route.Addr, err)
 		return
 	}
 	defer s.Pool.Put(route.Addr, backendConn)
 
-	// 4. 双向转发 (带超时控制)
-	s.log.Debug("Connection info",
-		"domain", result.Domain,
-		"sniff_ms", sniffDuration.Milliseconds(),
-		"match_ns", matchDuration.Nanoseconds(),
-		"dial_ms", dialDuration.Milliseconds(),
-		"total_ms", time.Since(start).Milliseconds(),
+	// 4. 子级流水报告 (Debug 级别)
+	logger.Debug("Handled request: domain=%s, sniff=%dms, match=%dns, dial=%dms, total=%dms",
+		result.Domain,
+		sniffDuration.Milliseconds(),
+		matchDuration.Nanoseconds(),
+		dialDuration.Milliseconds(),
+		time.Since(start).Milliseconds(),
 	)
 
-	s.log.Debug("Forwarding traffic", "domain", result.Domain, "backend", route.Addr)
+	logger.Info("Forwarding traffic: %s -> %s", result.Domain, route.Addr)
 	proxy.Forward(result.Conn, backendConn, time.Duration(route.IdleTimeout)*time.Second)
 }
