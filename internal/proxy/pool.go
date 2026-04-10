@@ -92,19 +92,12 @@ func (p *BackendPool) Get(addr string) (net.Conn, error) {
 				continue
 			}
 
-			// 2. 检查连接是否还存活 (非阻塞读探测)
-			item.conn.SetReadDeadline(time.Now().Add(time.Millisecond))
-			one := make([]byte, 1)
-			_, err := item.conn.Read(one)
-			
-			// 如果 Read 返回了错误（通常是 EOF），说明后端已经断开了连接
-			if err != nil {
+			// 2. 检查连接是否还存活 (非破坏性探测)
+			if !isAlive(item.conn) {
 				item.conn.Close()
 				continue
 			}
 
-			// 重置 Deadline 准备正常使用
-			item.conn.SetReadDeadline(time.Time{})
 			return item.conn, nil
 		default:
 			// 池子空了，发起新的握手 (带 TFO)
@@ -113,6 +106,38 @@ func (p *BackendPool) Get(addr string) (net.Conn, error) {
 			return dialWithTFO(ctx, addr)
 		}
 	}
+}
+
+// isAlive 使用 MSG_PEEK 检查连接是否可用，不消耗任何数据
+func isAlive(conn net.Conn) bool {
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		return true // 非 TCP 连接默认跳过检查
+	}
+
+	raw, err := tcpConn.SyscallConn()
+	if err != nil {
+		return false
+	}
+
+	var closed bool
+	_ = raw.Control(func(fd uintptr) {
+		var b [1]byte
+		// MSG_PEEK: 只窥视不读取
+		// MSG_DONTWAIT: 立即返回不阻塞
+		n, _, err := syscall.Recvfrom(int(fd), b[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
+		
+		// 如果读到 0 且没有错误，表示 EOF (对端已关闭)
+		if n == 0 && err == nil {
+			closed = true
+		}
+		// 如果报错且不是 EAGAIN/EWOULDBLOCK，也视为失效
+		if err != nil && err != syscall.EAGAIN && err != syscall.EWOULDBLOCK {
+			closed = true
+		}
+	})
+
+	return !closed
 }
 
 // Put 将健康的连接归还至池中
