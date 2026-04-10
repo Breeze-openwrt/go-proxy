@@ -30,6 +30,9 @@ func (s *Server) Start() error {
 					// 仅适用于 Linux 环境的 SO_BINDTODEVICE
 					controlErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, s.NetworkInterface)
 				}
+				// 23 是 Linux 上的 TCP_FASTOPEN 选项
+				// 设置为大于 0 的值（如 256）表示开启服务端的 TFO 队列
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 23, 256)
 			})
 			if err != nil {
 				return err
