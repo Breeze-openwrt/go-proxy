@@ -1,0 +1,6 @@
+/sni-proxy
+/*.log
+/run.log
+/startup_test.log
+/.gemini/
+/vendor/
