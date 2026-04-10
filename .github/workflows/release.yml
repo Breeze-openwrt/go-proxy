@@ -2,8 +2,11 @@ name: Build and Release Latest
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  workflow_dispatch: # 启用手动触发按钮
 
 permissions:
   contents: write
@@ -15,7 +18,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 获取所有历史以便清理
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -28,6 +31,7 @@ jobs:
           go build -ldflags="-s -w" -o sni-proxy main.go
 
       - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/') # 仅在推送 tag 时执行
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
@@ -39,19 +43,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup Old Releases and Tags
+        if: startsWith(github.ref, 'refs/tags/') # 仅在推送 tag 时执行
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_TAG: ${{ github.ref_name }}
         run: |
           echo "Scanning for old releases to delete (excluding $CURRENT_TAG)..."
-          
-          # 获取所有 release 并排除当前正在操作的 tag
-          # gh release list 的输出格式为: Title | Latest/Pre-release | Tag | Date
           OLD_TAGS=$(gh release list --limit 100 | awk -v cur="$CURRENT_TAG" '$3 != cur && $3 != "" {print $3}')
-          
           for tag in $OLD_TAGS; do
             echo "Deleting old release and tag: $tag"
             gh release delete "$tag" -y --cleanup-tag
           done
-          
-          echo "Cleanup complete. Current release: $CURRENT_TAG is now the only release."
+          echo "Cleanup complete."
