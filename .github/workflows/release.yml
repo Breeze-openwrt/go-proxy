@@ -36,7 +36,6 @@ jobs:
           ls -lh sni-proxy
 
       - name: Create or Update Release
-        # 移除了 if 限制，确保每次运行都会创建/更新 Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
@@ -51,7 +50,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enforcement - Keep Only One Release
-        # 确保清理始终执行
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,11 +60,22 @@ jobs:
           # 针对 main 分支推送，当前有效 Tag 视为 'latest'
           [ "$CURRENT_TAG" = "main" ] && CURRENT_TAG="latest"
           
-          RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          # 修正：增加 -r 参数以获取原始字符串（移除双引号）
+          RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | sed 's/\"//g')
+          
+          # 另一种更稳健的获取方式
           for tag in $RELEASES; do
+            if [ -z "$tag" ]; then continue; fi
             if [ "$tag" != "$CURRENT_TAG" ]; then
-              echo "Cleaning up redundant release and tag: $tag"
+              echo "Deleting redundant release and tag: $tag"
               gh release delete "$tag" -y --cleanup-tag || true
             fi
           done
+          
+          # 额外清场：如果存在一些没有 Release 的孤儿 Tag（v*），也尝试清理
+          if [ "$CURRENT_TAG" = "latest" ]; then
+             echo "Cleaning up orphan v* tags..."
+             git tag -l "v*" | grep -v "^$CURRENT_TAG$" | xargs -n 1 -I {} sh -c 'gh release delete {} -y --cleanup-tag || true'
+          fi
+          
           echo "Repository cleanup complete."
