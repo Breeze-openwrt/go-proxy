@@ -52,10 +52,10 @@ func (p *BackendPool) dialHappyEyeballs(ctx context.Context, addr string) (net.C
 			}
 		}(ip)
 
-		// 250ms 的 Stagger 延迟启动，避免 SYN Flood
+		// 100ms 的 Stagger 延迟启动 (Turbo 模式)，在 300ms 内几乎能覆盖所有常用 IP
 		if i < len(ips)-1 {
 			select {
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(100 * time.Millisecond):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -81,8 +81,19 @@ func (p *BackendPool) dialSingle(ctx context.Context, addr string) (net.Conn, er
 	d := net.Dialer{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
-				// TCP_FASTOPEN_CONNECT
+				// 1. TCP_FASTOPEN_CONNECT (Value 30 on Linux)
 				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 30, 1)
+				
+				// 2. TCP_NODELAY: 禁用 Nagle 算法，减少延迟
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+
+				// 3. TCP_QUICKACK: 强制立即发送 ACK，加快响应 (Value 12 on Linux)
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 12, 1)
+
+				// 4. Socket Buffer Tuning (4MB): 适应 4K 视频流的高带宽需求
+				const turboBufSize = 4 * 1024 * 1024
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, turboBufSize)
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, turboBufSize)
 			})
 		},
 	}
@@ -105,7 +116,7 @@ type BackendPool struct {
 func NewBackendPool() *BackendPool {
 	return &BackendPool{
 		pools:   make(map[string]chan *idleConn),
-		dialSem: make(chan struct{}, 64), // 限制最大并发拨号数为 64
+		dialSem: make(chan struct{}, 64), // 限制最大并发拨号数
 	}
 }
 
@@ -147,7 +158,7 @@ func (p *BackendPool) Get(addr string) (net.Conn, error) {
 	p.mu.Lock()
 	ch, ok := p.pools[addr]
 	if !ok {
-		ch = make(chan *idleConn, 20)
+		ch = make(chan *idleConn, 50)
 		p.pools[addr] = ch
 	}
 	p.mu.Unlock()
@@ -260,7 +271,7 @@ func (p *BackendPool) Put(addr string, conn net.Conn) {
 	p.mu.Lock()
 	ch, ok := p.pools[addr]
 	if !ok {
-		ch = make(chan *idleConn, 20)
+		ch = make(chan *idleConn, 50)
 		p.pools[addr] = ch
 	}
 	p.mu.Unlock()
