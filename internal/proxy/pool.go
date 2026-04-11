@@ -10,6 +10,14 @@ import (
 
 // dialHappyEyeballs 实现 Happy Eyeballs v2 (RFC 8305) 赛马竞争算法
 func (p *BackendPool) dialHappyEyeballs(ctx context.Context, addr string) (net.Conn, error) {
+	// 获取拨号令牌，防止过度并发
+	select {
+	case p.dialSem <- struct{}{}:
+		defer func() { <-p.dialSem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return p.dialSingle(ctx, addr)
@@ -89,13 +97,15 @@ type idleConn struct {
 
 // BackendPool 具有自愈能力的弹性后端连接池
 type BackendPool struct {
-	mu    sync.Mutex
-	pools map[string]chan *idleConn
+	mu          sync.Mutex
+	pools       map[string]chan *idleConn
+	dialSem     chan struct{} // 用于限制并发拨号的信号量
 }
 
 func NewBackendPool() *BackendPool {
 	return &BackendPool{
-		pools: make(map[string]chan *idleConn),
+		pools:   make(map[string]chan *idleConn),
+		dialSem: make(chan struct{}, 64), // 限制最大并发拨号数为 64
 	}
 }
 

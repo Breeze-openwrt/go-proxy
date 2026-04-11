@@ -1,44 +1,53 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net"
 	"sync"
 	"time"
 )
 
-// bufferPool 用于复用固定大小的字节切片 (Fallback 模式使用)
-var bufferPool = sync.Pool{
-	New: func() any {
-		return make([]byte, 32*1024)
-	},
-}
-
-// Forward 在两个连接之间进行双向数据拷贝，支持闲置超时
+// Forward 在两个连接之间进行双向数据拷贝，并使用哨兵协程维护闲置超时
 func Forward(conn1, conn2 net.Conn, idleTimeout time.Duration) {
+	// 使用 context 来协调哨兵协程的生命周期
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if idleTimeout > 0 {
+		// 启动哨兵协程：只要转发还在继续，就持续推后截止日期
+		go func() {
+			ticker := time.NewTicker(idleTimeout / 2)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					// 刷新两端的截止日期，赋予连接“生命值”
+					now := time.Now()
+					_ = conn1.SetReadDeadline(now.Add(idleTimeout))
+					_ = conn2.SetReadDeadline(now.Add(idleTimeout))
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// 开启两个方向的转发
+	// 开启双向转发 (利用 io.Copy 触发 Linux Splice 零拷贝)
 	go func() {
 		defer wg.Done()
-		copyWithTimeout(conn1, conn2, idleTimeout)
+		_, _ = io.Copy(conn1, conn2)
+		cancel() // 任意一端结束，立即通知另一端和哨兵退出
 	}()
 
 	go func() {
 		defer wg.Done()
-		copyWithTimeout(conn2, conn1, idleTimeout)
+		_, _ = io.Copy(conn2, conn1)
+		cancel()
 	}()
 
 	wg.Wait()
-}
-
-func copyWithTimeout(dst net.Conn, src net.Conn, timeout time.Duration) {
-	if timeout > 0 {
-		src.SetReadDeadline(time.Now().Add(timeout))
-	}
-
-	// 直接执行拷贝 (在 Linux TCP 间会自动触发 Splice 零拷贝)
-	// Go 的 io.Copy 会在内部循环 Read/Write 直到 EOF 或错误
-	_, _ = io.Copy(dst, src)
 }
